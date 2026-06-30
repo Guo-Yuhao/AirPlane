@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<robot name="airplane">
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="C:\Users\wanghongbin\Desktop\cv\modelstl.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.7 0.7 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="C:\Users\wanghongbin\Desktop\cv\modelstl.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1000.0"/>
+      <inertia ixx="500.0" ixy="0" ixz="0" iyy="500.0" iyz="0" izz="500.0"/>
+    </inertial>
+  </link>
+</robot>
