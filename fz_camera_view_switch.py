@@ -11,6 +11,7 @@ try:
     from PIL import Image
     PIL_AVAILABLE = True
 except Exception:
+    Image = None
     PIL_AVAILABLE = False
 
 # ============================================================
@@ -45,7 +46,7 @@ KEY_YAW_POS = 117    # U
 KEY_YAW_NEG = 111    # O
 
 print("=" * 78)
-print("✈️ 飞机机身 + 机翼六自由度控制 + 三相机布置调试")
+print("飞机机身 + 机翼六自由度控制 + 三相机布置调试")
 print("=" * 78)
 
 # ============================================================
@@ -77,17 +78,17 @@ WING_STL = find_existing_file(script_dir, ["model-left-wing.stl", "model-left-wi
 FUSELAGE_STL = find_existing_file(script_dir, ["model-body.stl", "model-body.STL"])
 
 if WING_STL is None:
-    print("❌ 找不到机翼文件：model-left-wing.stl / model-left-wing.STL")
+    print("找不到机翼文件：model-left-wing.stl / model-left-wing.STL")
     exit(1)
 if FUSELAGE_STL is None:
-    print("❌ 找不到机身文件：model-body.stl / model-body.STL")
+    print("找不到机身文件：model-body.stl / model-body.STL")
     exit(1)
 
-print(f"✅ 找到机翼: {WING_STL}")
-print(f"✅ 找到机身: {FUSELAGE_STL}")
-print(f"📁 相机图像输出目录: {output_dir}")
+print(f"找到机翼: {WING_STL}")
+print(f"找到机身: {FUSELAGE_STL}")
+print(f"相机图像输出目录: {output_dir}")
 if not PIL_AVAILABLE:
-    print("⚠️ 未检测到 Pillow，按 C 保存 PNG 会失败。请先运行: pip install pillow")
+    print("警告：未检测到 Pillow，按 C 保存 PNG 会失败。请先运行: pip install pillow")
 
 # ============================================================
 # 创建 URDF 文件
@@ -101,8 +102,6 @@ def create_urdf(stl_path, name, scale=0.01, mass=1000.0, color=None, use_collisi
 
     collision_block = ""
     if use_collision:
-        # 当前程序已有六自由度控制，保留 collision 可以继续使用 getAABB 等功能。
-        # 如果加载很慢，可把 use_collision 改为 False，只做视觉显示。
         collision_block = f'''
     <collision>
       <geometry>
@@ -131,8 +130,6 @@ def create_urdf(stl_path, name, scale=0.01, mass=1000.0, color=None, use_collisi
     return urdf_content
 
 
-# 注意：这里沿用你原代码的 scale=0.01，保证模型尺度不突然变化。
-# 如果以后要按 mm -> m 的物理尺度，请统一改成 scale=0.001，并同步调整相机距离。
 MESH_SCALE = 0.01
 USE_COLLISION_MESH = True
 
@@ -147,14 +144,18 @@ with open(fuselage_urdf, 'w', encoding='utf-8') as f:
     f.write(create_urdf(FUSELAGE_STL, "fuselage", scale=MESH_SCALE, mass=2000.0,
                         color=[0.7, 0.7, 0.8], use_collision=USE_COLLISION_MESH))
 
-print("✅ URDF 文件创建完成")
+print("URDF 文件创建完成")
 
 # ============================================================
 # 启动 PyBullet
 # ============================================================
 
-print("⏳ 启动 PyBullet...")
+print("正在启动 PyBullet...")
 physicsClient = p.connect(p.GUI)
+if physicsClient < 0:
+    print("物理服务器连接失败，程序退出")
+    exit(1)
+
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.setGravity(0, 0, 0)  # 无重力
 p.setTimeStep(1.0 / 240.0)
@@ -163,7 +164,7 @@ p.setTimeStep(1.0 / 240.0)
 # 加载地面
 # ============================================================
 
-print("⏳ 加载地面...")
+print("正在加载地面...")
 
 ground_visual = p.createVisualShape(
     p.GEOM_PLANE,
@@ -182,13 +183,13 @@ for i in range(-50, 51, 5):
     p.addUserDebugLine([i, -50, 0.01], [i, 50, 0.01], [0.5, 0.5, 0.5], lineWidth=1)
     p.addUserDebugLine([-50, i, 0.01], [50, i, 0.01], [0.5, 0.5, 0.5], lineWidth=1)
 
-print("✅ 地面加载完成 (50x50米)")
+print("地面加载完成 (50x50米)")
 
 # ============================================================
 # 加载机身（固定）
 # ============================================================
 
-print("⏳ 加载机身...")
+print("正在加载机身...")
 try:
     fuselage_id = p.loadURDF(
         fuselage_urdf,
@@ -197,17 +198,18 @@ try:
         useFixedBase=True,
         flags=p.URDF_USE_SELF_COLLISION
     )
-    print("✅ 机身加载成功 (固定)")
+    print("机身加载成功 (固定)")
 except Exception as e:
-    print(f"❌ 机身加载失败: {e}")
-    p.disconnect()
+    print(f"机身加载失败: {e}")
+    if p.isConnected():
+        p.disconnect()
     exit(1)
 
 fuselage_aabb = p.getAABB(fuselage_id)
 fuselage_center = [(fuselage_aabb[0][i] + fuselage_aabb[1][i]) / 2 for i in range(3)]
 fuselage_size = [fuselage_aabb[1][i] - fuselage_aabb[0][i] for i in range(3)]
 print(
-    f"📐 机身: 尺寸 {fuselage_size[0]:.2f}x{fuselage_size[1]:.2f}x{fuselage_size[2]:.2f}m, "
+    f"机身: 尺寸 {fuselage_size[0]:.2f}x{fuselage_size[1]:.2f}x{fuselage_size[2]:.2f}m, "
     f"中心 ({fuselage_center[0]:.2f}, {fuselage_center[1]:.2f}, {fuselage_center[2]:.2f})"
 )
 
@@ -215,7 +217,7 @@ print(
 # 加载机翼（可移动，六自由度）
 # ============================================================
 
-print("⏳ 加载机翼...")
+print("正在加载机翼...")
 try:
     initial_position = [3.0, 0, 1.0]
     initial_orientation = [0, 0, 0, 1]
@@ -227,7 +229,7 @@ try:
         useFixedBase=False,
         flags=p.URDF_USE_SELF_COLLISION
     )
-    print("✅ 机翼加载成功 (六自由度可动)")
+    print("机翼加载成功 (六自由度可动)")
 
     p.changeDynamics(
         wing_id, -1,
@@ -238,16 +240,25 @@ try:
     )
 
 except Exception as e:
-    print(f"❌ 机翼加载失败: {e}")
-    p.disconnect()
+    print(f"机翼加载失败: {e}")
+    if p.isConnected():
+        p.disconnect()
     exit(1)
 
-wing_aabb = p.getAABB(wing_id)
-wing_centroid = [(wing_aabb[0][i] + wing_aabb[1][i]) / 2 for i in range(3)]
-wing_size = [wing_aabb[1][i] - wing_aabb[0][i] for i in range(3)]
+# ============================================================
+# 计算机翼固定参数
+# ============================================================
+
+# 计算机翼相对于基点的局部形心偏移（模型坐标系下固定不变）
+wing_init_pos, wing_init_quat = p.getBasePositionAndOrientation(wing_id)
+wing_init_aabb = p.getAABB(wing_id)
+wing_init_centroid = [(wing_init_aabb[0][i] + wing_init_aabb[1][i]) / 2 for i in range(3)]
+centroid_local = np.array(wing_init_centroid) - np.array(wing_init_pos)
+
+wing_size = [wing_init_aabb[1][i] - wing_init_aabb[0][i] for i in range(3)]
 print(
-    f"📐 机翼: 尺寸 {wing_size[0]:.2f}x{wing_size[1]:.2f}x{wing_size[2]:.2f}m, "
-    f"形心 ({wing_centroid[0]:.2f}, {wing_centroid[1]:.2f}, {wing_centroid[2]:.2f})"
+    f"机翼: 尺寸 {wing_size[0]:.2f}x{wing_size[1]:.2f}x{wing_size[2]:.2f}m, "
+    f"形心 ({wing_init_centroid[0]:.2f}, {wing_init_centroid[1]:.2f}, {wing_init_centroid[2]:.2f})"
 )
 
 # ============================================================
@@ -263,38 +274,51 @@ p.addUserDebugText("Z", [0, 0, 5.5], textColorRGB=[0, 0, 1], textSize=1.5)
 
 p.addUserDebugText("Fuselage fixed", [fuselage_center[0], fuselage_center[1], fuselage_center[2] + 2.5],
                    textColorRGB=[0.7, 0.7, 0.8], textSize=1.3)
-p.addUserDebugText("Wing 6-DOF", [wing_centroid[0], wing_centroid[1], wing_centroid[2] + 2.0],
+p.addUserDebugText("Wing 6-DOF", [wing_init_centroid[0], wing_init_centroid[1], wing_init_centroid[2] + 2.0],
                    textColorRGB=[0.2, 0.4, 0.8], textSize=1.3)
 
+# 机翼初始形心标记
+p.addUserDebugLine([wing_init_centroid[0] - 0.3, wing_init_centroid[1], wing_init_centroid[2]],
+                   [wing_init_centroid[0] + 0.3, wing_init_centroid[1], wing_init_centroid[2]], [1, 1, 0], lineWidth=3)
+p.addUserDebugLine([wing_init_centroid[0], wing_init_centroid[1] - 0.3, wing_init_centroid[2]],
+                   [wing_init_centroid[0], wing_init_centroid[1] + 0.3, wing_init_centroid[2]], [1, 1, 0], lineWidth=3)
+p.addUserDebugLine([wing_init_centroid[0], wing_init_centroid[1], wing_init_centroid[2] - 0.3],
+                   [wing_init_centroid[0], wing_init_centroid[1], wing_init_centroid[2] + 0.3], [1, 1, 0], lineWidth=3)
+
+p.addUserDebugText("centroid", [wing_init_centroid[0], wing_init_centroid[1], wing_init_centroid[2] + 0.6],
+                   textColorRGB=[1, 1, 0], textSize=1.2)
+
 # ============================================================
-# 六自由度控制变量与函数
+# 六自由度控制参数与函数
 # ============================================================
 
-current_pos = [3.0, 0, 1.0]
-current_quat = [0, 0, 0, 1]
+current_pos = list(initial_position)
+current_quat = list(initial_orientation)
 
-TRANSLATION_STEP = 0.1
-ROTATION_STEP = 2.0
+TRANSLATION_SPEED = 2.0   # 平移速度：米/秒
+ROTATION_SPEED = 30.0     # 旋转速度：度/秒
 
 
 def get_wing_centroid():
-    """获取机翼当前的 AABB 形心位置。"""
-    aabb = p.getAABB(wing_id)
-    return [(aabb[0][i] + aabb[1][i]) / 2 for i in range(3)]
+    """获取机翼当前的形心世界坐标（基于固定局部形心偏移计算）"""
+    pos, quat = p.getBasePositionAndOrientation(wing_id)
+    r = R.from_quat(quat)
+    centroid_world = np.array(pos) + r.apply(centroid_local)
+    return centroid_world.tolist()
 
 
 def reset_wing():
-    """重置机翼。"""
+    """重置机翼位置和姿态"""
     global current_pos, current_quat
     current_pos = [3.0, 0, 1.0]
     current_quat = [0, 0, 0, 1]
     p.resetBasePositionAndOrientation(wing_id, current_pos, current_quat)
     p.resetBaseVelocity(wing_id, [0, 0, 0], [0, 0, 0])
-    print("\n🔄 机翼已重置")
+    print("\n机翼已重置")
 
 
 def move_wing_translation(dx, dy, dz):
-    """平移机翼。"""
+    """平移机翼（世界坐标系下平移）"""
     global current_pos
     current_pos[0] += dx
     current_pos[1] += dy
@@ -304,55 +328,52 @@ def move_wing_translation(dx, dy, dz):
 
 
 def rotate_wing(axis, angle_deg):
-    """绕当前机翼 AABB 形心旋转。"""
+    """绕机翼局部坐标轴旋转，旋转中心为机翼形心"""
     global current_pos, current_quat
 
-    centroid = get_wing_centroid()
-    r = R.from_quat(current_quat)
+    # 获取当前位姿
+    pos, quat = p.getBasePositionAndOrientation(wing_id)
+    r = R.from_quat(quat)
 
-    if axis == 'x':
-        delta_r = R.from_euler('x', angle_deg, degrees=True)
-    elif axis == 'y':
-        delta_r = R.from_euler('y', angle_deg, degrees=True)
-    elif axis == 'z':
-        delta_r = R.from_euler('z', angle_deg, degrees=True)
-    else:
-        return
+    # 计算当前形心世界坐标
+    centroid_world = np.array(pos) + r.apply(centroid_local)
 
-    new_r = delta_r * r
+    # 生成局部旋转增量，四元数右乘实现绕机体轴旋转
+    delta_r = R.from_euler(axis, angle_deg, degrees=True)
+    new_r = r * delta_r
     new_quat = new_r.as_quat()
 
-    pos, _ = p.getBasePositionAndOrientation(wing_id)
-    centroid_local = np.array(centroid) - np.array(pos)
-    centroid_local_rotated = delta_r.apply(centroid_local)
-    new_pos = np.array(centroid) - centroid_local_rotated
+    # 计算新的基点位置：形心保持不动，基点随旋转偏移
+    base_offset_local = -centroid_local
+    base_offset_rotated = new_r.apply(base_offset_local)
+    new_pos = centroid_world + base_offset_rotated
 
+    # 更新全局状态并应用到物理引擎
     current_pos = new_pos.tolist()
     current_quat = new_quat.tolist()
-
     p.resetBasePositionAndOrientation(wing_id, current_pos, current_quat)
     p.resetBaseVelocity(wing_id, [0, 0, 0], [0, 0, 0])
 
 
 def focus_on_wing():
-    """GUI 视角聚焦到机翼。"""
-    pos, _ = p.getBasePositionAndOrientation(wing_id)
+    """GUI 视角聚焦到机翼形心"""
+    centroid = get_wing_centroid()
     p.resetDebugVisualizerCamera(
         cameraDistance=8,
         cameraYaw=30,
         cameraPitch=-30,
-        cameraTargetPosition=pos
+        cameraTargetPosition=centroid
     )
-    print("\n🎯 GUI 已聚焦到机翼")
+    print("\nGUI 已聚焦到机翼")
 
 
 def print_status():
-    """打印机翼状态。"""
+    """实时打印机翼状态信息"""
     pos, quat = p.getBasePositionAndOrientation(wing_id)
     centroid = get_wing_centroid()
     euler = R.from_quat(quat).as_euler('xyz', degrees=True)
-    print(f"\r📍 机翼位置: X={pos[0]:6.2f} Y={pos[1]:6.2f} Z={pos[2]:6.2f} | "
-          f"形心: X={centroid[0]:6.2f} Y={centroid[1]:6.2f} Z={centroid[2]:6.2f} | "
+    print(f"\r机翼位置: X={pos[0]:6.2f} Y={pos[1]:6.2f} Z={pos[2]:6.2f} | "
+          f"形心: X={centroid[0]:6.2f} Y={centroid[1]:6.2f} Z={centroid[2]:.2f} | "
           f"姿态: Roll={euler[0]:6.1f}° Pitch={euler[1]:6.1f}° Yaw={euler[2]:6.1f}°", end="")
 
 # ============================================================
@@ -367,10 +388,9 @@ CAMERA_FAR = 100.0
 
 # 初始测量目标点：先取当前机翼形心。后续按 T 可更新到新的机翼形心。
 measurement_target = np.array(get_wing_centroid(), dtype=float)
-print(f"🎯 初始相机测量目标点: X={measurement_target[0]:.2f}, Y={measurement_target[1]:.2f}, Z={measurement_target[2]:.2f}")
+print(f"初始相机测量目标点: X={measurement_target[0]:.2f}, Y={measurement_target[1]:.2f}, Z={measurement_target[2]:.2f}")
 
 # 三台相机相对 measurement_target 的初始偏移。
-# 若模型尺度以后从 0.01 改成 0.001，这些偏移建议同步缩小 10 倍。
 camera_base_offsets = [
     np.array([0.0, -10.0, 3.0], dtype=float),   # 主相机：正前方偏上
     np.array([-6.0, -8.0, 3.5], dtype=float),   # 左前方斜视
@@ -381,7 +401,6 @@ camera_names = ["cam_1_main", "cam_2_left_oblique", "cam_3_right_high"]
 camera_colors = [[1, 0, 0], [0, 1, 0], [0, 0.35, 1]]
 
 # GUI 滑块：可直接拖动调整相机相对目标点的位置。
-# 注意：滑块读数是相对 target 的 offset，不是世界坐标。
 camera_sliders = []
 for i, offset in enumerate(camera_base_offsets):
     prefix = f"Cam{i + 1}"
@@ -390,7 +409,7 @@ for i, offset in enumerate(camera_base_offsets):
     sz = p.addUserDebugParameter(f"{prefix} offset Z", 0.5, 15, float(offset[2]))
     camera_sliders.append((sx, sy, sz))
 
-# 目标点微调滑块。一般先不用动，特殊情况下可以微调相机共同看向的位置。
+# 目标点微调滑块。
 target_slider_x = p.addUserDebugParameter("Target fine X", -5, 5, 0)
 target_slider_y = p.addUserDebugParameter("Target fine Y", -5, 5, 0)
 target_slider_z = p.addUserDebugParameter("Target fine Z", -5, 5, 0)
@@ -458,7 +477,9 @@ def get_camera_configs():
 
 
 def update_camera_debug_visuals():
-    """更新相机位置小球、视线和文字。"""
+    # 更新相机位置小球、视线和文字。
+    if not p.isConnected():
+        return
     global camera_debug_line_ids, camera_debug_text_ids
 
     for item_id in camera_debug_line_ids + camera_debug_text_ids:
@@ -533,7 +554,7 @@ def render_camera(cam):
 def save_all_camera_images(frame_id):
     """保存三台相机的 RGB 图像，并保存相机参数 JSON。"""
     if not PIL_AVAILABLE:
-        print("\n❌ 无法保存 PNG：未安装 Pillow。请运行 pip install pillow")
+        print("\n无法保存 PNG：未安装 Pillow。请运行 pip install pillow")
         return
 
     configs = get_camera_configs()
@@ -569,7 +590,7 @@ def save_all_camera_images(frame_id):
     with open(os.path.join(batch_dir, "camera_params.json"), "w", encoding="utf-8") as f:
         json.dump(params, f, ensure_ascii=False, indent=2)
 
-    print(f"\n📷 已保存三台相机图像和参数: {batch_dir}")
+    print(f"\n已保存三台相机图像和参数: {batch_dir}")
 
 
 def focus_gui_to_target():
@@ -581,7 +602,7 @@ def focus_gui_to_target():
         cameraPitch=-35,
         cameraTargetPosition=target.tolist()
     )
-    print("\n🎯 GUI 已聚焦到测量目标点")
+    print("\nGUI 已聚焦到测量目标点")
 
 
 # 当前 GUI 是否锁定到某台虚拟相机。
@@ -592,9 +613,6 @@ active_camera_view_index = None
 def eye_target_to_debug_camera(eye, target):
     """
     将虚拟相机的 eye-target 表示转换为 PyBullet GUI debug camera 参数。
-
-    注意：resetDebugVisualizerCamera 是轨道相机，不是严格的投影相机。
-    这里让 GUI 观察方向尽量与 computeViewMatrix 的 eye->target 方向一致，
     用于人工检查相机视野；真正的数据采集仍以 getCameraImage 为准。
     """
     eye = np.array(eye, dtype=float)
@@ -605,8 +623,6 @@ def eye_target_to_debug_camera(eye, target):
     if distance < 1e-6:
         return 5.0, 0.0, -30.0
 
-    # PyBullet debug camera 常用约定：
-    # yaw=0 大致从 -Y 方向看向目标，pitch<0 表示相机高于目标并向下看。
     yaw = math.degrees(math.atan2(direction[0], direction[1]))
     pitch = math.degrees(math.asin(np.clip(direction[2] / distance, -1.0, 1.0)))
     pitch = float(np.clip(pitch, -89.0, 89.0))
@@ -617,9 +633,7 @@ def eye_target_to_debug_camera(eye, target):
 def set_gui_view_to_virtual_camera(camera_index, lock=True, verbose=True):
     """
     把 PyBullet GUI 观察视角切到某台虚拟相机的视角。
-
     lock=True 时，后续拖动相机滑块后，GUI 会继续跟随这台相机。
-    按 0 可以解除锁定并回到总览视角。
     """
     global active_camera_view_index
 
@@ -644,7 +658,7 @@ def set_gui_view_to_virtual_camera(camera_index, lock=True, verbose=True):
         eye = cam["eye"]
         target = cam["target"]
         print(
-            f"\n👁️ GUI 已切换到 {cam['name']} 视角 "
+            f"\nGUI 已切换到 {cam['name']} 视角 "
             f"| eye=({eye[0]:.2f}, {eye[1]:.2f}, {eye[2]:.2f}) "
             f"target=({target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f})"
         )
@@ -660,11 +674,11 @@ def set_gui_overview():
         cameraPitch=-35,
         cameraTargetPosition=[1.5, 0, 1.5]
     )
-    print("\n🌐 已返回总览视角，相机视角锁定已解除")
+    print("\n已返回总览视角，相机视角锁定已解除")
 
 
 def cycle_gui_camera_view():
-    """V 键循环：Cam1 → Cam2 → Cam3 → 总览。"""
+    """V 键循环：Cam1 -> Cam2 -> Cam3 -> 总览。"""
     global active_camera_view_index
     if active_camera_view_index is None:
         set_gui_view_to_virtual_camera(0, lock=True, verbose=True)
@@ -687,14 +701,14 @@ def update_measurement_target_to_wing():
     global measurement_target
     measurement_target = np.array(get_wing_centroid(), dtype=float)
     print(
-        f"\n🎯 相机目标点已更新为当前机翼形心: "
+        f"\n相机目标点已更新为当前机翼形心: "
         f"X={measurement_target[0]:.2f}, Y={measurement_target[1]:.2f}, Z={measurement_target[2]:.2f}"
     )
 
 
 def print_camera_configs():
     configs = get_camera_configs()
-    print("\n📷 当前三相机参数:")
+    print("\n当前三相机参数:")
     for cam in configs:
         eye = cam["eye"]
         target = cam["target"]
@@ -720,32 +734,32 @@ p.resetDebugVisualizerCamera(
 # ============================================================
 
 print("\n" + "=" * 78)
-print("🎮 控制说明")
+print("控制说明")
 print("=" * 78)
 print("")
-print("  📍 机翼平移控制 (步长 0.1m):")
-print("     A/D  → X轴负/正方向移动")
-print("     S/W  → Y轴负/正方向移动")
-print("     Q/E  → Z轴负/正方向移动 (下降/上升)")
+print("  机翼平移控制 (速度 2m/s):")
+print("     A/D  -> X轴负/正方向移动")
+print("     S/W  -> Y轴负/正方向移动")
+print("     Q/E  -> Z轴负/正方向移动 (下降/上升)")
 print("")
-print("  🔄 机翼旋转控制 (步长 2°):")
-print("     J/L  → 绕X轴旋转 (滚转)")
-print("     K/I  → 绕Y轴旋转 (俯仰)")
-print("     U/O  → 绕Z轴旋转 (偏航)")
+print("  机翼旋转控制 (速度 30°/s，绕机体局部轴):")
+print("     J/L  -> 绕X轴旋转 (滚转)")
+print("     K/I  -> 绕Y轴旋转 (俯仰)")
+print("     U/O  -> 绕Z轴旋转 (偏航)")
 print("")
-print("  📷 三相机调试:")
-print("     右侧 Debug Sliders → 调整 Cam1/Cam2/Cam3 的 offset X/Y/Z")
-print("     T    → 将三台相机共同目标点更新为当前机翼形心")
-print("     C    → 保存三台相机 RGB/Depth/Seg 图像和 camera_params.json")
-print("     1/2/3→ GUI 切换到相机1/2/3的视角，并锁定跟随")
-print("     0    → 返回总览视角，并解除相机视角锁定")
-print("     V    → 在相机1/2/3/总览之间循环切换")
-print("     G    → GUI 聚焦到测量目标点")
+print("  三相机调试:")
+print("     右侧 Debug Sliders -> 调整 Cam1/Cam2/Cam3 的 offset X/Y/Z")
+print("     T    -> 将三台相机共同目标点更新为当前机翼形心")
+print("     C    -> 保存三台相机 RGB/Depth/Seg 图像和 camera_params.json")
+print("     1/2/3-> GUI 切换到相机1/2/3的视角，并锁定跟随")
+print("     0    -> 返回总览视角，并解除相机视角锁定")
+print("     V    -> 在相机1/2/3/总览之间循环切换")
+print("     G    -> GUI 聚焦到测量目标点")
 print("")
-print("  🎯 其他:")
-print("     R    → 重置机翼位置和姿态")
-print("     F    → GUI 聚焦到机翼")
-print("     ESC  → 退出程序")
+print("  其他功能:")
+print("     R    -> 重置机翼位置和姿态")
+print("     F    -> GUI 聚焦到机翼")
+print("     ESC  -> 退出程序")
 print("=" * 78 + "\n")
 
 # ============================================================
@@ -754,9 +768,15 @@ print("=" * 78 + "\n")
 
 frame_count = 0
 last_camera_debug_update = 0
+last_time = time.time()
 
 try:
     while True:
+        # 计算帧间隔，保证运动速度与帧率无关
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+
         p.stepSimulation()
         time.sleep(1.0 / 240.0)
 
@@ -774,7 +794,7 @@ try:
         keys = p.getKeyboardEvents()
 
         if KEY_EXIT in keys and keys[KEY_EXIT] & p.KEY_WAS_TRIGGERED:
-            print("\n👋 退出程序")
+            print("\n退出程序")
             break
 
         if KEY_R in keys and keys[KEY_R] & p.KEY_WAS_TRIGGERED:
@@ -805,7 +825,8 @@ try:
         if KEY_V in keys and keys[KEY_V] & p.KEY_WAS_TRIGGERED:
             cycle_gui_camera_view()
 
-        step_t = TRANSLATION_STEP
+        # 平移控制
+        step_t = TRANSLATION_SPEED * dt
         if KEY_X_NEG in keys and keys[KEY_X_NEG] & p.KEY_IS_DOWN:
             move_wing_translation(-step_t, 0, 0)
         if KEY_X_POS in keys and keys[KEY_X_POS] & p.KEY_IS_DOWN:
@@ -819,7 +840,8 @@ try:
         if KEY_Z_POS in keys and keys[KEY_Z_POS] & p.KEY_IS_DOWN:
             move_wing_translation(0, 0, step_t)
 
-        step_r = ROTATION_STEP
+        # 旋转控制
+        step_r = ROTATION_SPEED * dt
         if KEY_ROLL_NEG in keys and keys[KEY_ROLL_NEG] & p.KEY_IS_DOWN:
             rotate_wing('x', -step_r)
         if KEY_ROLL_POS in keys and keys[KEY_ROLL_POS] & p.KEY_IS_DOWN:
@@ -834,13 +856,20 @@ try:
             rotate_wing('z', -step_r)
 
 except KeyboardInterrupt:
-    print("\n👋 用户中断")
+    print("\n用户中断")
+except p.error:
+    print("\n物理连接已断开，程序退出")
 
 finally:
-    p.disconnect()
+    # 安全断开连接，避免未连接状态下报错
+    if p.isConnected():
+        p.disconnect()
+    # 清理临时URDF文件
     try:
-        os.remove(wing_urdf)
-        os.remove(fuselage_urdf)
+        if os.path.exists(wing_urdf):
+            os.remove(wing_urdf)
+        if os.path.exists(fuselage_urdf):
+            os.remove(fuselage_urdf)
     except Exception:
         pass
-    print("🔚 仿真已关闭")
+    print("仿真已关闭")
