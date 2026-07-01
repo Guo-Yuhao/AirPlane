@@ -1,0 +1,20 @@
+<?xml version='1.0'?>
+<robot name='fuselage'>
+  <link name='base_link'>
+    <visual>
+      <geometry>
+        <mesh filename='c:/Users/gyh49/Desktop/Mine/Learn_Work/2026_Summer/model-body.stl' scale='0.01 0.01 0.01'/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename='c:/Users/gyh49/Desktop/Mine/Learn_Work/2026_Summer/model-body.stl' scale='0.01 0.01 0.01'/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value='1'/>
+      <origin xyz='0 0 0' rpy='0 0 0'/>
+      <inertia ixx='1' ixy='0' ixz='0' iyy='1' iyz='0' izz='1'/>
+    </inertial>
+  </link>
+</robot>

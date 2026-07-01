@@ -4,14 +4,18 @@ import time
 import os
 import json
 import math
+import struct
+import tempfile
 import numpy as np
+from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation as R
+from typing import Any
 
 try:
     from PIL import Image
     PIL_AVAILABLE = True
 except Exception:
-    Image = None
+    Image: Any = None
     PIL_AVAILABLE = False
 
 # ============================================================
@@ -28,6 +32,8 @@ KEY_2 = 50     # GUI视角切到相机2
 KEY_3 = 51     # GUI视角切到相机3
 KEY_0 = 48     # 返回总览视角，并解除相机视角锁定
 KEY_V = 118    # 在相机1/2/3/总览之间循环切换
+KEY_P = 112    # 启动/停止定时自动拍摄
+KEY_H = 104    # 重新计算当前机翼/机身相机布局
 
 # 平移控制
 KEY_X_POS = 100  # D
@@ -146,6 +152,90 @@ with open(fuselage_urdf, 'w', encoding='utf-8') as f:
 
 print("URDF 文件创建完成")
 
+
+def _load_stl_vertices(stl_path):
+    """从二进制 STL 文件中读取顶点坐标。"""
+    vertices = []
+    with open(stl_path, 'rb') as f:
+        header = f.read(80)
+        tri_count_data = f.read(4)
+        if len(tri_count_data) < 4:
+            raise ValueError("不是有效的二进制 STL 文件")
+        tri_count = int.from_bytes(tri_count_data, byteorder='little')
+        for _ in range(tri_count):
+            f.read(12)  # normal
+            coords = f.read(36)
+            if len(coords) < 36:
+                break
+            verts = struct.unpack('<9f', coords)
+            vertices.extend([(verts[0], verts[1], verts[2]), (verts[3], verts[4], verts[5]), (verts[6], verts[7], verts[8])])
+            f.read(2)  # attribute byte count
+    return np.array(vertices, dtype=float)
+
+
+def _create_convex_collision_shape_from_stl(stl_path):
+    """从 STL 顶点创建一个近似的凸包碰撞形状。"""
+    vertices = _load_stl_vertices(stl_path)
+    if vertices.shape[0] == 0:
+        raise ValueError("STL 文件未包含顶点")
+
+    hull = ConvexHull(vertices)
+    hull_vertices = vertices[hull.vertices]
+    index_map = {orig_idx: new_idx + 1 for new_idx, orig_idx in enumerate(hull.vertices)}
+
+    with tempfile.NamedTemporaryFile(suffix='.obj', delete=False, mode='w', encoding='utf-8') as f:
+        for v in hull_vertices:
+            f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+        for simplex in hull.simplices:
+            f.write(
+                f"f {index_map[simplex[0]]} {index_map[simplex[1]]} {index_map[simplex[2]]}\n"
+            )
+        obj_path = f.name
+
+    return obj_path
+
+
+def create_mesh_body(stl_path, basePosition, baseOrientation, fixed, mass, color):
+    """使用真实网格创建 PyBullet 可视体，并根据刚体类型创建合适碰撞体。"""
+    abs_path = os.path.abspath(stl_path).replace('\\', '/')
+    visual_shape = p.createVisualShape(
+        p.GEOM_MESH,
+        fileName=abs_path,
+        meshScale=[MESH_SCALE, MESH_SCALE, MESH_SCALE],
+        rgbaColor=[color[0], color[1], color[2], 1.0]
+    )
+
+    if USE_COLLISION_MESH:
+        if fixed:
+            collision_shape = p.createCollisionShape(
+                p.GEOM_MESH,
+                fileName=abs_path,
+                meshScale=[MESH_SCALE, MESH_SCALE, MESH_SCALE],
+                flags=p.GEOM_FORCE_CONCAVE_TRIMESH
+            )
+        else:
+            obj_path = _create_convex_collision_shape_from_stl(stl_path)
+            collision_shape = p.createCollisionShape(
+                p.GEOM_MESH,
+                fileName=obj_path,
+                meshScale=[MESH_SCALE, MESH_SCALE, MESH_SCALE]
+            )
+            try:
+                os.remove(obj_path)
+            except Exception:
+                pass
+    else:
+        collision_shape = -1
+
+    body_mass = 0 if fixed else mass
+    return p.createMultiBody(
+        baseMass=body_mass,
+        baseCollisionShapeIndex=collision_shape,
+        baseVisualShapeIndex=visual_shape,
+        basePosition=basePosition,
+        baseOrientation=baseOrientation
+    )
+
 # ============================================================
 # 启动 PyBullet
 # ============================================================
@@ -191,12 +281,13 @@ print("地面加载完成 (50x50米)")
 
 print("正在加载机身...")
 try:
-    fuselage_id = p.loadURDF(
-        fuselage_urdf,
+    fuselage_id = create_mesh_body(
+        FUSELAGE_STL,
         basePosition=[0, 0, 0.5],
         baseOrientation=[0, 0, 0, 1],
-        useFixedBase=True,
-        flags=p.URDF_USE_SELF_COLLISION
+        fixed=True,
+        mass=2000.0,
+        color=[0.7, 0.7, 0.8]
     )
     print("机身加载成功 (固定)")
 except Exception as e:
@@ -222,12 +313,13 @@ try:
     initial_position = [3.0, 0, 1.0]
     initial_orientation = [0, 0, 0, 1]
 
-    wing_id = p.loadURDF(
-        wing_urdf,
+    wing_id = create_mesh_body(
+        WING_STL,
         basePosition=initial_position,
         baseOrientation=initial_orientation,
-        useFixedBase=False,
-        flags=p.URDF_USE_SELF_COLLISION
+        fixed=False,
+        mass=5000.0,
+        color=[0.2, 0.4, 0.8]
     )
     print("机翼加载成功 (六自由度可动)")
 
@@ -317,14 +409,38 @@ def reset_wing():
     print("\n机翼已重置")
 
 
+def _is_wing_position_valid(candidate_pos):
+    """检测机翼在给定位姿是否与机身碰撞。"""
+    old_pos, old_quat = p.getBasePositionAndOrientation(wing_id)
+    p.resetBasePositionAndOrientation(wing_id, candidate_pos, current_quat)
+    contacts = p.getClosestPoints(bodyA=fuselage_id, bodyB=wing_id, distance=0.0)
+    p.resetBasePositionAndOrientation(wing_id, old_pos, old_quat)
+    return len(contacts) == 0
+
+
 def move_wing_translation(dx, dy, dz):
-    """平移机翼（世界坐标系下平移）"""
+    """平移机翼（世界坐标系下平移），碰撞时按轴阻断对应方向移动。"""
     global current_pos
-    current_pos[0] += dx
-    current_pos[1] += dy
-    current_pos[2] += dz
-    current_pos = np.clip(current_pos, [-20, -20, 0.1], [20, 20, 20]).tolist()
+
+    max_bounds = np.array([20, 20, 20], dtype=float)
+    min_bounds = np.array([-20, -20, 0.1], dtype=float)
+
+    target_pos = np.array(current_pos, dtype=float)
+    for axis, delta in enumerate((dx, dy, dz)):
+        if abs(delta) < 1e-9:
+            continue
+        trial_pos = target_pos.copy()
+        trial_pos[axis] += delta
+        trial_pos = np.clip(trial_pos, min_bounds, max_bounds)
+        if _is_wing_position_valid(trial_pos.tolist()):
+            target_pos = trial_pos
+        else:
+            # 遇到与机身碰撞时，只阻断该方向，不影响其他轴移动。
+            pass
+
+    current_pos = target_pos.tolist()
     p.resetBasePositionAndOrientation(wing_id, current_pos, current_quat)
+    p.resetBaseVelocity(wing_id, [0, 0, 0], [0, 0, 0])
 
 
 def rotate_wing(axis, angle_deg):
@@ -376,6 +492,92 @@ def print_status():
           f"形心: X={centroid[0]:6.2f} Y={centroid[1]:6.2f} Z={centroid[2]:.2f} | "
           f"姿态: Roll={euler[0]:6.1f}° Pitch={euler[1]:6.1f}° Yaw={euler[2]:6.1f}°", end="")
 
+
+def estimate_interface_y(wing_aabb, fuselage_aabb):
+    """估计翼身接口附近的 y 坐标。"""
+    w_min = np.array(wing_aabb[0], dtype=float)
+    w_max = np.array(wing_aabb[1], dtype=float)
+    f_min = np.array(fuselage_aabb[0], dtype=float)
+    f_max = np.array(fuselage_aabb[1], dtype=float)
+
+    if w_min[1] <= f_max[1] and f_min[1] <= w_max[1]:
+        overlap_min = max(w_min[1], f_min[1])
+        overlap_max = min(w_max[1], f_max[1])
+        return 0.5 * (overlap_min + overlap_max)
+
+    if w_max[1] < f_min[1]:
+        return 0.5 * (w_max[1] + f_min[1])
+
+    return 0.5 * (f_max[1] + w_min[1])
+
+
+def compute_user_requested_camera_layout():
+    """根据当前机翼和机身 AABB 计算推荐的三相机布局。"""
+    wing_aabb_now = p.getAABB(wing_id)
+    fuselage_aabb_now = p.getAABB(fuselage_id)
+
+    w_min = np.array(wing_aabb_now[0], dtype=float)
+    w_max = np.array(wing_aabb_now[1], dtype=float)
+    f_min = np.array(fuselage_aabb_now[0], dtype=float)
+    f_max = np.array(fuselage_aabb_now[1], dtype=float)
+
+    wing_center = 0.5 * (w_min + w_max)
+    fuselage_center = 0.5 * (f_min + f_max)
+    wing_size_now = w_max - w_min
+
+    interface_point = []
+    for axis in range(3):
+        if w_min[axis] <= f_max[axis] and f_min[axis] <= w_max[axis]:
+            overlap_min = max(w_min[axis], f_min[axis])
+            overlap_max = min(w_max[axis], f_max[axis])
+            interface_point.append(0.5 * (overlap_min + overlap_max))
+        elif w_max[axis] < f_min[axis]:
+            interface_point.append(0.5 * (w_max[axis] + f_min[axis]))
+        else:
+            interface_point.append(0.5 * (f_max[axis] + w_min[axis]))
+
+    target = np.array(interface_point, dtype=float)
+    target[2] = 0.65 * wing_center[2] + 0.35 * target[2]
+
+    wing_side_x = np.sign(wing_center[0] - fuselage_center[0])
+    if abs(wing_side_x) < 1e-6:
+        wing_side_x = -1.0
+
+    wing_side_y = np.sign(wing_center[1] - fuselage_center[1])
+    if abs(wing_side_y) < 1e-6:
+        wing_side_y = -1.0
+
+    dominant_size = float(max(wing_size_now[0], wing_size_now[1], 1.0))
+    x_side_distance = float(np.clip(0.45 * dominant_size, 3.0, 9.0))
+    y_front_distance = float(np.clip(0.45 * dominant_size, 3.0, 9.0))
+    side_height_offset = float(np.clip(0.06 * dominant_size, 0.25, 1.20))
+    top_height = float(np.clip(0.35 * dominant_size, 2.0, 5.0))
+    top_y_offset = float(np.clip(0.22 * y_front_distance, 0.8, 2.5))
+
+    cam1_eye = target + np.array([wing_side_x * x_side_distance, 0.0, side_height_offset], dtype=float)
+    cam2_eye = target + np.array([0.0, wing_side_y * y_front_distance, side_height_offset], dtype=float)
+    cam3_eye = target + np.array([0.0, wing_side_y * top_y_offset, top_height], dtype=float)
+
+    offsets = [cam1_eye - target, cam2_eye - target, cam3_eye - target]
+
+    layout_info = {
+        "wing_aabb": [w_min.tolist(), w_max.tolist()],
+        "fuselage_aabb": [f_min.tolist(), f_max.tolist()],
+        "wing_center": wing_center.tolist(),
+        "fuselage_center": fuselage_center.tolist(),
+        "interface_point": target.tolist(),
+        "interface_y": float(target[1]),
+        "wing_side_x": float(wing_side_x),
+        "wing_side_y": float(wing_side_y),
+        "x_side_distance": x_side_distance,
+        "y_front_distance": y_front_distance,
+        "side_height_offset": side_height_offset,
+        "top_y_offset": top_y_offset,
+        "top_height": top_height,
+    }
+
+    return target, offsets, layout_info
+
 # ============================================================
 # 三相机配置与调试模块
 # ============================================================
@@ -386,33 +588,38 @@ CAMERA_FOV = 55.0
 CAMERA_NEAR = 0.1
 CAMERA_FAR = 100.0
 
-# 初始测量目标点：先取当前机翼形心。后续按 T 可更新到新的机翼形心。
-measurement_target = np.array(get_wing_centroid(), dtype=float)
-print(f"初始相机测量目标点: X={measurement_target[0]:.2f}, Y={measurement_target[1]:.2f}, Z={measurement_target[2]:.2f}")
+# 初始测量目标点与三相机偏移：直接由机翼/机身 AABB 自动计算。
+measurement_target, camera_base_offsets, auto_layout_info = compute_user_requested_camera_layout()
+print(
+    f"初始相机测量目标点: X={measurement_target[0]:.2f}, Y={measurement_target[1]:.2f}, Z={measurement_target[2]:.2f}"
+)
+print(
+    f"自动估计翼身接口 y={auto_layout_info['interface_y']:.2f}, "
+    f"Cam1 X侧距离={auto_layout_info['x_side_distance']:.2f}, "
+    f"Cam2 Y向距离={auto_layout_info['y_front_distance']:.2f}, "
+    f"Cam3 斜俯视高度={auto_layout_info['top_height']:.2f}"
+)
 
 # 三台相机相对 measurement_target 的初始偏移。
-camera_base_offsets = [
-    np.array([0.0, -10.0, 3.0], dtype=float),   # 主相机：正前方偏上
-    np.array([-6.0, -8.0, 3.5], dtype=float),   # 左前方斜视
-    np.array([6.0, -8.0, 5.0], dtype=float),    # 右前方高位斜视
-]
-
-camera_names = ["cam_1_main", "cam_2_left_oblique", "cam_3_right_high"]
+camera_names = ["cam_1_x_side_interface", "cam_2_y_gap_interface", "cam_3_oblique_top"]
 camera_colors = [[1, 0, 0], [0, 1, 0], [0, 0.35, 1]]
+camera_up_vectors = [[0, 0, 1], [0, 0, 1], [0, 1, 0]]
 
-# GUI 滑块：可直接拖动调整相机相对目标点的位置。
+# GUI 滑块：在自动计算出的相机位置基础上做 fine 调整。
+# slider 表示相对于自动偏移的微调量。
 camera_sliders = []
 for i, offset in enumerate(camera_base_offsets):
     prefix = f"Cam{i + 1}"
-    sx = p.addUserDebugParameter(f"{prefix} offset X", -20, 20, float(offset[0]))
-    sy = p.addUserDebugParameter(f"{prefix} offset Y", -20, 20, float(offset[1]))
-    sz = p.addUserDebugParameter(f"{prefix} offset Z", 0.5, 15, float(offset[2]))
+    sx = p.addUserDebugParameter(f"{prefix} fine X", -10, 10, 0.0)
+    sy = p.addUserDebugParameter(f"{prefix} fine Y", -10, 10, 0.0)
+    sz = p.addUserDebugParameter(f"{prefix} fine Z", -10, 10, 0.0)
     camera_sliders.append((sx, sy, sz))
 
-# 目标点微调滑块。
+# 目标点微调滑块。一般先不用动，特殊情况下可以微调相机共同看向的位置。
 target_slider_x = p.addUserDebugParameter("Target fine X", -5, 5, 0)
 target_slider_y = p.addUserDebugParameter("Target fine Y", -5, 5, 0)
 target_slider_z = p.addUserDebugParameter("Target fine Z", -5, 5, 0)
+auto_capture_interval_slider = p.addUserDebugParameter("Auto capture interval (s)", 1.0, 30.0, 3.0)
 
 camera_marker_ids = []
 for i in range(3):
@@ -459,15 +666,16 @@ def get_camera_configs():
     target = get_camera_target()
     configs = []
     for i, sliders in enumerate(camera_sliders):
-        ox = p.readUserDebugParameter(sliders[0])
-        oy = p.readUserDebugParameter(sliders[1])
-        oz = p.readUserDebugParameter(sliders[2])
-        offset = np.array([ox, oy, oz], dtype=float)
-        eye = target + offset
+        fx = p.readUserDebugParameter(sliders[0])
+        fy = p.readUserDebugParameter(sliders[1])
+        fz = p.readUserDebugParameter(sliders[2])
+        fine_offset = np.array([fx, fy, fz], dtype=float)
+        eye = target + camera_base_offsets[i] + fine_offset
         configs.append({
             "name": camera_names[i],
             "eye": eye,
             "target": target,
+            "up": camera_up_vectors[i],
             "color": camera_colors[i],
             "fov": CAMERA_FOV,
             "width": CAMERA_WIDTH,
@@ -523,7 +731,7 @@ def get_view_projection(cam):
     view_matrix = p.computeViewMatrix(
         cameraEyePosition=eye,
         cameraTargetPosition=target,
-        cameraUpVector=[0, 0, 1]
+        cameraUpVector=cam.get("up", [0, 0, 1])
     )
 
     projection_matrix = p.computeProjectionMatrixFOV(
@@ -551,7 +759,7 @@ def render_camera(cam):
     return rgb, depth, seg
 
 
-def save_all_camera_images(frame_id):
+def save_all_camera_images(frame_id, capture_mode="manual"):
     """保存三台相机的 RGB 图像，并保存相机参数 JSON。"""
     if not PIL_AVAILABLE:
         print("\n无法保存 PNG：未安装 Pillow。请运行 pip install pillow")
@@ -559,11 +767,12 @@ def save_all_camera_images(frame_id):
 
     configs = get_camera_configs()
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    batch_dir = os.path.join(output_dir, f"capture_{stamp}_frame_{frame_id}")
+    batch_dir = os.path.join(output_dir, f"{capture_mode}_{stamp}_frame_{frame_id}")
     os.makedirs(batch_dir, exist_ok=True)
 
     params = {
         "frame_id": frame_id,
+        "capture_mode": capture_mode,
         "time": stamp,
         "width": CAMERA_WIDTH,
         "height": CAMERA_HEIGHT,
@@ -591,6 +800,7 @@ def save_all_camera_images(frame_id):
         json.dump(params, f, ensure_ascii=False, indent=2)
 
     print(f"\n已保存三台相机图像和参数: {batch_dir}")
+    return batch_dir
 
 
 def focus_gui_to_target():
@@ -603,6 +813,77 @@ def focus_gui_to_target():
         cameraTargetPosition=target.tolist()
     )
     print("\nGUI 已聚焦到测量目标点")
+
+
+auto_capture_enabled = False
+last_auto_capture_time = 0.0
+
+
+def get_auto_capture_interval():
+    """读取自动拍摄间隔，单位为秒。"""
+    try:
+        interval = float(p.readUserDebugParameter(auto_capture_interval_slider))
+    except Exception:
+        interval = 3.0
+    return max(0.5, interval)
+
+
+def toggle_auto_capture(frame_id):
+    """按 P 启动/停止自动定时拍摄。启动时立即拍一组。"""
+    global auto_capture_enabled, last_auto_capture_time
+
+    auto_capture_enabled = not auto_capture_enabled
+
+    if auto_capture_enabled:
+        interval = get_auto_capture_interval()
+        print(f"\n自动定时拍摄已启动：每 {interval:.1f} s 保存一组三相机图像。按 P 再次停止。")
+        save_all_camera_images(frame_id, capture_mode="auto_start")
+        last_auto_capture_time = time.monotonic()
+    else:
+        print("\n自动定时拍摄已停止。")
+
+
+def maybe_auto_capture(frame_id):
+    """若自动拍摄开启，并且到达时间间隔，则保存一组三相机图像。"""
+    global last_auto_capture_time
+
+    if not auto_capture_enabled:
+        return
+
+    now = time.monotonic()
+    interval = get_auto_capture_interval()
+
+    if now - last_auto_capture_time >= interval:
+        last_auto_capture_time = now
+        save_all_camera_images(frame_id, capture_mode="auto")
+
+
+def reset_camera_layout_to_current_geometry():
+    """按当前机翼/机身 AABB 重新计算三相机自动布局。"""
+    global measurement_target, camera_base_offsets, auto_layout_info
+
+    measurement_target, camera_base_offsets, auto_layout_info = compute_user_requested_camera_layout()
+    print(
+        f"\n已按当前机翼/机身位置重新计算对接三相机布局："
+        f"target=({measurement_target[0]:.2f}, {measurement_target[1]:.2f}, {measurement_target[2]:.2f}), "
+        f"interface_y={auto_layout_info['interface_y']:.2f}, "
+        f"x_side_distance={auto_layout_info['x_side_distance']:.2f}, "
+        f"y_front_distance={auto_layout_info['y_front_distance']:.2f}, "
+        f"top_height={auto_layout_info['top_height']:.2f}"
+    )
+
+
+def print_auto_layout_info(prefix="当前自动布局参数"):
+    try:
+        _, _, info = compute_user_requested_camera_layout()
+        print(
+            f"\n{prefix}: interface_y={info['interface_y']:.2f}, "
+            f"x_side_distance={info['x_side_distance']:.2f}, "
+            f"y_front_distance={info['y_front_distance']:.2f}, "
+            f"top_height={info['top_height']:.2f}"
+        )
+    except Exception as e:
+        print(f"\n自动布局参数读取失败: {e}")
 
 
 # 当前 GUI 是否锁定到某台虚拟相机。
@@ -791,6 +1072,7 @@ try:
         if frame_count % 60 == 0:
             print_status()
 
+        maybe_auto_capture(frame_count)
         keys = p.getKeyboardEvents()
 
         if KEY_EXIT in keys and keys[KEY_EXIT] & p.KEY_WAS_TRIGGERED:
@@ -811,7 +1093,15 @@ try:
             print_camera_configs()
 
         if KEY_C in keys and keys[KEY_C] & p.KEY_WAS_TRIGGERED:
-            save_all_camera_images(frame_count)
+            save_all_camera_images(frame_count, capture_mode="manual")
+            print_camera_configs()
+
+        if KEY_P in keys and keys[KEY_P] & p.KEY_WAS_TRIGGERED:
+            toggle_auto_capture(frame_count)
+
+        if KEY_H in keys and keys[KEY_H] & p.KEY_WAS_TRIGGERED:
+            reset_camera_layout_to_current_geometry()
+            update_camera_debug_visuals()
             print_camera_configs()
 
         if KEY_1 in keys and keys[KEY_1] & p.KEY_WAS_TRIGGERED:
